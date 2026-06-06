@@ -7,6 +7,21 @@ Reference data accompanying the bug report:
 
 This repo exists to give the kernel driver maintainers concrete artefacts to reproduce against — input file, bootloader binaries, nothing more.
 
+## ✅ FIXED (correctness) 2026-06-06 — root cause found: missing RK3576 power-up warmup
+
+The race is **not** a wrong register or a silicon lottery — it is **un-primed hardware
+state after power-up**. The Rockchip BSP runs a one-shot priming decode
+(`rk3576_workaround_run`, `hack/mpp_hack_rk3576.c`) at every decoder power-on
+(probe + every `pm_runtime` resume) that mainline V4L2 omits. Replicating that warmup at
+`pm_runtime_resume` **eliminates the deblock race**: 64/64 decodes bit-exact vs an
+`avdec_h264` reference, vs a reproduced ~17–40% baseline race. **See [FIX.md](FIX.md)**
+for the root cause, the register kick sequence, a reference port, and validation.
+
+(Correctness only — mainline single-shot throughput is a separate limitation: real HDMI
+playback still drops frames at 1080p30 / 4K is ~30 fps. See FIX.md §caveat.)
+
+The original triage below is retained as the record that led here.
+
 ## Update 2026-06-05 — the bug is NON-DETERMINISTIC; isolated to below-MMIO HW behaviour
 
 Re-testing on current mainline (`rkvdec-vdpu383-h264.c`, kernel 7.0.1, NanoPi R76S)

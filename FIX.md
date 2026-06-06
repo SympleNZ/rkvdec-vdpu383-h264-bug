@@ -1,0 +1,92 @@
+# FIX — the deblock race is the missing RK3576 power-up warmup
+
+**Status (2026-06-06): root cause found, correctness fix validated.** The
+non-deterministic H.264 deblock corruption on `rkvdec-vdpu383-h264.c` (RK3576 / VDPU383)
+is **not** a wrong register or a silicon lottery — it is an **un-primed hardware state**
+after power-up. The Rockchip BSP runs a one-shot priming decode at every decoder power-on
+that the mainline V4L2 driver does not. Replicating that warmup **eliminates the race**.
+
+## Root cause
+
+The BSP kernel driver runs `rk3576_workaround_run()`
+(`drivers/video/rockchip/mpp/hack/mpp_hack_rk3576.c`, Rockchip, 2024). At init it builds a
+tiny self-contained H.264 task in a DMA buffer — RLC slice + SPS/PPS + a full register set
+(incl. `reg8` dec_mode, `reg13` timeout, `reg16` error-proc, `reg20/21` cabac-error,
+`reg148` intra_rcb, `reg216` colmv) + a link descriptor — and **runs it through the
+link/CCU path on every decoder power-up**: at probe and on every
+`pm_runtime` **resume** (`mpp_rkvdec2.c`). It is a hardware **state initialisation**: it
+primes the VDPU383's internal decode state after each power-on.
+
+Mainline V4L2 `rkvdec` has **no equivalent** — it powers the IP up (`pm_runtime_resume`)
+and decodes cold. The first decode(s) after each power-up therefore run with indeterminate
+internal deblock state, which is exactly the observed **non-deterministic** corruption at
+the H.264 4-row deblock edges (`{4,12,13} mod 16`), propagating through references.
+
+This also explains every earlier negative in this repo: matching all per-frame registers,
+RCB content/size/**placement**, clocks, caches, barriers, and the submit model to MPP
+never helped, because the difference is **not per-frame** — it is the once-per-power-up
+priming the vendor stack does and mainline omits.
+
+## The fix
+
+Run the RK3576 warmup at **`pm_runtime_resume`** (and probe), as the BSP does. The minimal
+sufficient trigger is **resume** — it catches every power-up; running it only at
+`start_streaming` left a ~10% residual (some decodes resume without a fresh stream start).
+
+A working reference implementation (DMA priming buffer + the link-register kick sequence,
+ported from the BSP disassembly) is in the sibling repos
+[`rkvdec-vdpu383-vp9`](https://github.com/SympleNZ/rkvdec-vdpu383-vp9) /
+[`rkvdec-vdpu383-av1`](https://github.com/SympleNZ/rkvdec-vdpu383-av1):
+`src/rkvdec-link.c` — `rkvdec_rk3576_warmup_{alloc,populate,run,free}` — wired from
+`rkvdec.c` at probe + runtime_resume. The core kick sequence:
+
+```c
+/* link_base = the VDPU383 link MMIO bank; buf_iova = priming DMA buffer.
+ * Descriptor is at buf+0x1000; priming H.264 task data at buf+0. */
+writel(0x8000,  link_base + 0x58);                 /* ip_en: BIT(15) only      */
+writel(0x7ffff, link_base + 0x54);                 /* ip watchdog              */
+writel(0x10001, link_base + 0x00);                 /* ccu/init                 */
+writel(lower_32_bits(buf_iova) + 0x1000, link_base + 0x04); /* CFG_ADDR -> desc */
+writel(0x1, link_base + 0x08);                     /* LINK_MODE = 1            */
+writel(0x1, link_base + 0x18);                     /* LINK_EN   = 1            */
+dsb(st); dmb(oshst);
+writel(0x1, link_base + 0x0c);                      /* CFG_DONE -> HW commits   */
+/* poll link_base+0x4c for status (~21 ms budget), then clear + tear down:    */
+writel(0xffff0000, link_base + 0x48);
+writel(0xffff0000, link_base + 0x4c);
+writel(0, link_base + 0x00); writel(0, link_base + 0x08);
+writel(0, link_base + 0x18); dmb(oshst); writel(0, link_base + 0x58);
+```
+
+The priming task's register/data layout (offsets, the 32-byte RLC + SPS/PPS, the
+descriptor) is taken verbatim from `mpp_hack_rk3576.c::rk3576_workaround_init`.
+
+## Validation
+
+Byte-exact vs `avdec_h264` software reference, on a fresh boot (NanoPi R76S, RK3576,
+Armbian 7.0.1):
+
+| stream | config | result |
+|---|---|---|
+| `bf.h264` (720p) | warmup OFF (baseline) | race present, ~17–40% of runs corrupt |
+| `long.h264` (1080p, this repo) | warmup OFF | race present, 2/12 corrupt |
+| `bf.h264` | warmup on **resume** only | **20/20 clean** |
+| `bf.h264` + `long.h264` | warmup (all triggers) | **44/44 clean** |
+| `bf.h264` | warmup **on by default**, no params | **20/20 clean** |
+
+**Aggregate: 64/64 warmup decodes bit-exact; baseline race reproduced on both streams.**
+The warmup runs once per power-up, so it does **not** regress throughput.
+
+## Caveat — this fixes correctness, not throughput
+
+Mainline single-shot decode on RK3576 is throughput-limited independently of this bug:
+real HDMI playback drops frames even at 1080p30, and 4K is ~30 fps vs the BSP's ~112 fps.
+That is the mainline per-frame submit overhead (no link-mode pipelining), a separate issue
+from the deblock race. The warmup makes H.264 **correct**; smooth real-time playback still
+needs the link-mode/throughput work.
+
+## TL;DR for the maintainer
+
+The VDPU383 needs the BSP's `rk3576_workaround_run` priming decode at `pm_runtime_resume`;
+mainline omits it; adding it eliminates the deblock race (64/64 bit-exact). Reference port
+in the sibling VP9/AV1 repos (`rkvdec-link.c` warmup + `rkvdec.c` resume hook).
