@@ -60,6 +60,23 @@ H.264's 4-row edges deterministically is not visible at, or controllable from, t
 mainline V4L2 register/submit interface. Pointers to what MPP sets up *once* at the
 device/session level (below per-frame programming) would be the most useful lead.
 
+## Update 2026-06-06 — RCB placement (SRAM vs DRAM) also ruled out
+
+A later finding on the AV1 path (same VDPU383 RCB allocator) showed the Rockchip BSP
+kernel rewrites the RCB base registers *in the kernel at submit* (`mpp_set_rcbbuf`):
+it uses SRAM only when the DT wires `rockchip,rcb-iova` and `frame_width >= rcb_min_width`,
+otherwise leaving RCB in **DRAM**. The BSP board's DT has no `rcb-iova`, so the working
+MPP stack decodes with **DRAM** RCB — while the mainline V4L2 driver always uses **SRAM**
+RCB. That rewrite happens after the HAL register dump, so it was a blind spot in the
+earlier "registers match MPP" comparison.
+
+Forcing all-DRAM RCB in the mainline driver and re-running the deblock test changed
+nothing: **clean 6/8 vs 5/8 broken (DRAM vs SRAM, N=8) — the same race at the same rate
+and ~47% magnitude.** So RCB *placement*, like RCB content and geometry before it, does
+not affect the H.264 deblock race. (The placement lever *does* move AV1's separate
+intra-above-row bug — which is why it was worth excluding here; for H.264 it has no
+effect.)
+
 ## Hardware
 
 - SoC: Rockchip RK3576 (VDPU383)
