@@ -7,7 +7,7 @@ Reference data accompanying the bug report:
 
 This repo exists to give the kernel driver maintainers concrete artefacts to reproduce against — input file, bootloader binaries, nothing more.
 
-## Update 2026-06-05 — the bug is NON-DETERMINISTIC; root cause narrowed to submit path
+## Update 2026-06-05 — the bug is NON-DETERMINISTIC; isolated to below-MMIO HW behaviour
 
 Re-testing on current mainline (`rkvdec-vdpu383-h264.c`, kernel 7.0.1, NanoPi R76S)
 substantially refines the original report:
@@ -24,29 +24,41 @@ substantially refines the original report:
   *different* (degenerate) result; the real 0%/20.57% pattern needs ≥2 frames decoded.
   Pipeline depth modulates the probability slightly but never eliminates the race.
 
-**Systematically eliminated as causes (each A/B'd at N≈30 on hardware; none change the
+**Systematically eliminated as causes (each A/B'd at N≈25-30 on hardware; none change the
 race):** RCB buffer *content* (0xAA/0x00 prefill — HW overwrites the filterd context and
 races on its own data, not a stale read) · RCB sizes/geometry (set to MPP's exact
 captured values reg152=38592/reg154=38592/reg156=49536/reg158=reg160=0) · RCB column
 registers · block auto-gating (reg10) · ctrl regs reg13/20/21 · AXI timing reg28/29
-(`addr_align`, `rd_latency`) · decoder clock rate (identical: aclk/core 594 MHz, hclk
-198 MHz, cabac 1 GHz) · pipeline/buffer depth · pre-kick `wmb()` + `iommu_flush_iotlb_all()`.
+(`addr_align`, `rd_latency`) · **decoder internal cache clear (CACHE0 and CACHE0/1/2
+BSP-style, pre-kick)** · decoder clock rate (identical: aclk/core 594 MHz, hclk 198 MHz,
+cabac 1 GHz) · pipeline/buffer depth · pre-kick `wmb()` + `iommu_flush_iotlb_all()`.
+
+**HEVC is the control.** HEVC shares the *entire* H.264 submit path (same `memcpy_toio`
+register write + `writel(DEC_ENABLE)` kick, same RCB allocator, no cache-clear/reset/
+barrier, same clocks) and is **correct**, while only H.264 races. So no shared-path tweak
+can be the cause — consistent with every negative above. The only H.264-specific variable
+left (after matching all register values to MPP) is the HW deblock algorithm for H.264's
+**4-row** in-macroblock edges vs HEVC's 8-row.
 
 **Ground truth:** vendor MPP on the BSP stack (`mpi_dec_test`, same RK3576 silicon) is
 bit-exact, and its per-decode register programming was captured and matched — i.e. the
 **mainline V4L2 driver already programs MPP-equivalent registers**, yet still races.
 
-**Remaining difference = the submit path.** MPP/BSP issues the job via a **link-table
-(CCU) DMA descriptor** submit; the mainline V4L2 backend writes the register file via CPU
-MMIO (`memcpy_toio`) and kicks directly (single-shot). In separate VP9 work on the same
-driver, switching VP9 to the existing link-table path sent *byte-identical* registers yet
-changed decoded output — confirming the submit architecture (not the register values) is
-the operative difference; but our V4L2 link path is incomplete (needs the BSP per-task
-queue/lifecycle) and regressed VP9, so it is not a drop-in test for H.264.
+**Submit model tested directly — also NOT the cause.** MPP/BSP issues the job via a
+**link-table (CCU) DMA descriptor** submit; the mainline backend writes the register file
+via CPU MMIO and kicks single-shot. We wired the H.264 backend into a working link-table
+submit path (depth=1, descriptor-DMA, BSP-style completion) and measured the race head to
+head from a clean boot: **link-table = 20/25 good (5 bad), single-shot = 19/25 good (6
+bad)** — the *same* deblock race at the *same* rate. So the hazard is **independent of the
+submit model**. (This matches separate VP9 work where the link path produced output
+byte-identical to single-shot.)
 
-**Net for maintainers:** this looks like a submit-mode / HW-pipeline timing hazard in the
-deblock stage, not a missing or wrong register. The register programming is already
-MPP-equivalent.
+**Net for maintainers:** this is a **below-the-MMIO-interface HW behaviour** in the H.264
+deblock stage — not a missing/wrong register, not the cache, not the submit model (all
+tested and matched to MPP). Whatever the vendor stack does to make the VDPU383 deblock
+H.264's 4-row edges deterministically is not visible at, or controllable from, the
+mainline V4L2 register/submit interface. Pointers to what MPP sets up *once* at the
+device/session level (below per-frame programming) would be the most useful lead.
 
 ## Hardware
 
