@@ -30,9 +30,10 @@ the two sibling VDPU383 codec bugs. H.264 turned out to be the **fixable** one (
 power-up state → warmup). The other two are deeper and remain open below the MMIO interface:
 
 - **VP9 compound (SELECT/alt-ref)** — [`SympleNZ/rkvdec-vdpu383-vp9`](https://github.com/SympleNZ/rkvdec-vdpu383-vp9):
-  the *complete* entropy-input prob buffer is byte-identical to MPP (0 diffs), the HW fetches
-  both compound legs (so it engages at the fetch level), and no reserved register bit gates it —
-  the failure is in the internal compound **combine**.
+  the *complete* entropy-input prob buffer is byte-identical to MPP (0 diffs), the candidate
+  references are fetched, and no reserved register bit gates it — yet the HW decodes zero
+  compound blocks (`comp_mode` never adapts). The divergence is the per-block compound/single
+  **decision**, upstream of the (proven-sound) averaging unit.
 - **AV1 partial decode** — [`SympleNZ/rkvdec-vdpu383-av1`](https://github.com/SympleNZ/rkvdec-vdpu383-av1):
   the HW writes the intra above-row context; the failure scales with **content** (0–65% of rows
   survive), not a fixed row count — a content-driven internal-state exhaustion.
