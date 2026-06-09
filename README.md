@@ -92,6 +92,34 @@ not affect the H.264 deblock race. (The placement lever *does* move AV1's separa
 intra-above-row bug — which is why it was worth excluding here; for H.264 it has no
 effect.)
 
+## Update 2026-06-08 — RCB content-independence shown directly; warmup IRQ-reap probed
+
+Two follow-ups prompted by review feedback (is it an RCB *data state* problem; could the
+warmup be reaped by IRQ instead of polled):
+
+- **RCB data state is not the cause — shown directly.** Reading the filterd RCB (slot 6)
+  *after* each decode and comparing across runs: its content — including the meaningful
+  first-16 KB deblock-context head, not just an uninitialised tail — is **non-deterministic
+  run to run even across byte-identical correct decodes**. GOOD and BAD runs both span
+  all-unique buffer CRCs with no shared "good state" / "bad signature". So there is **no
+  stable working-vs-broken RCB state to compare**, and the buffer content does not determine
+  correctness. This is the direct answer to "dump the RCB before/after and compare against
+  the working case": the comparison is moot because the final buffer content is downstream
+  scratch, not the determinant. Confirms the content-independent read-before-write race
+  (consistent with the 0xAA/0x00 prefill result above) that the power-up warmup — which
+  primes HW *state*, not this buffer — is what fixes.
+
+- **The standalone warmup raises no completion IRQ (so it can't be IRQ-reaped as-is).** We
+  prototyped reaping the warmup by interrupt instead of the ~21 ms status poll: arm the link
+  `INT_EN` before `CFG_DONE` and wait on a completion driven from the top-level IRQ handler.
+  The warmup **never raises an IRQ** — every reap hit the timeout fallback (tried `INT_EN`
+  bit 0, then all bits). The warmup descriptor is a CCU/link-init task, not a normal decode
+  task; it signals only via the `0x4c` status register, which is exactly why the BSP
+  `rk3576_workaround_run` polls it. Correctness was unaffected (the warmup still primes; the
+  validation set stayed bit-exact). A genuinely IRQ-reaped warmup would have to be issued as
+  a real task in the decode link table (so it rides the normal decode-completion IRQ) rather
+  than as the standalone init descriptor. The polled warmup remains the shipping form.
+
 ## Hardware
 
 - SoC: Rockchip RK3576 (VDPU383)
