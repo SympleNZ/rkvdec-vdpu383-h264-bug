@@ -22,6 +22,24 @@ playback still drops frames at 1080p30 / 4K is ~30 fps. See FIX.md §caveat.)
 
 The original triage below is retained as the record that led here.
 
+### Sibling VDPU383 bugs (2026-06-09 status)
+
+The same below-MMIO investigation toolkit developed here — register/GBL/CDF/stream byte-diffs
+vs MPP, IOMMU access-trace fault probes, and reserved-register-bit sweeps — has been applied to
+the two sibling VDPU383 codec bugs. H.264 turned out to be the **fixable** one (un-primed
+power-up state → warmup). The other two are deeper and remain open below the MMIO interface:
+
+- **VP9 compound (SELECT/alt-ref)** — [`SympleNZ/rkvdec-vdpu383-vp9`](https://github.com/SympleNZ/rkvdec-vdpu383-vp9):
+  the *complete* entropy-input prob buffer is byte-identical to MPP (0 diffs), the HW fetches
+  both compound legs (so it engages at the fetch level), and no reserved register bit gates it —
+  the failure is in the internal compound **combine**.
+- **AV1 partial decode** — [`SympleNZ/rkvdec-vdpu383-av1`](https://github.com/SympleNZ/rkvdec-vdpu383-av1):
+  the HW writes the intra above-row context; the failure scales with **content** (0–65% of rows
+  survive), not a fixed row count — a content-driven internal-state exhaustion.
+
+These confirm H.264's warmup fix was a *distinct, fixable* class; VP9/AV1 need the hardware
+documentation.
+
 ## Update 2026-06-05 — the bug is NON-DETERMINISTIC; isolated to below-MMIO HW behaviour
 
 Re-testing on current mainline (`rkvdec-vdpu383-h264.c`, kernel 7.0.1, NanoPi R76S)
