@@ -15,7 +15,10 @@ state after power-up**. The Rockchip BSP runs a one-shot priming decode
 (probe + every `pm_runtime` resume) that mainline V4L2 omits. Replicating that warmup at
 `pm_runtime_resume` **eliminates the deblock race**: 64/64 decodes bit-exact vs an
 `avdec_h264` reference, vs a reproduced ~17–40% baseline race. **See [FIX.md](FIX.md)**
-for the root cause, the register kick sequence, a reference port, and validation.
+for the root cause, the register kick sequence, and validation — and
+[`fix/`](fix/) for a clean, DT-free, mainline-applicable patch (`git apply`-clean on
+v7.0 / v7.1-rc7; the whole H.264 correctness fix in one self-contained file + a
+`pm_runtime_resume` hook).
 
 (Correctness only — mainline single-shot throughput is a separate limitation: real HDMI
 playback still drops frames at 1080p30 / 4K is ~30 fps. See FIX.md §caveat.)

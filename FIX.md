@@ -33,12 +33,14 @@ Run the RK3576 warmup at **`pm_runtime_resume`** (and probe), as the BSP does. T
 sufficient trigger is **resume** — it catches every power-up; running it only at
 `start_streaming` left a ~10% residual (some decodes resume without a fresh stream start).
 
-A working reference implementation (DMA priming buffer + the link-register kick sequence,
-ported from the BSP disassembly) is in the sibling repos
-[`rkvdec-vdpu383-vp9`](https://github.com/SympleNZ/rkvdec-vdpu383-vp9) /
-[`rkvdec-vdpu383-av1`](https://github.com/SympleNZ/rkvdec-vdpu383-av1):
-`src/rkvdec-link.c` — `rkvdec_rk3576_warmup_{alloc,populate,run,free}` — wired from
-`rkvdec.c` at probe + runtime_resume. The core kick sequence:
+A self-contained, mainline-applicable patch is in this repo:
+[`fix/0001-media-rkvdec-prime-VDPU383-deblock-warmup-rk3576.patch`](fix/0001-media-rkvdec-prime-VDPU383-deblock-warmup-rk3576.patch).
+It adds a new `rkvdec-rk3576-workaround.c` (the priming buffer + the link-bank kick sequence,
+ported from the BSP `rk3576_workaround_{init,run}`) and wires it from `rkvdec.c` at probe
+(allocate once) + `pm_runtime_resume` (run on every power-up). It is **pure code, no
+devicetree change** — mainline already maps the `"link"` register bank the priming uses.
+Verified `git apply`-clean against v7.0 and v7.1-rc7 (the rkvdec driver is byte-identical
+between them). The core kick sequence:
 
 ```c
 /* link_base = the VDPU383 link MMIO bank; buf_iova = priming DMA buffer.
@@ -49,17 +51,50 @@ writel(0x10001, link_base + 0x00);                 /* ccu/init                 *
 writel(lower_32_bits(buf_iova) + 0x1000, link_base + 0x04); /* CFG_ADDR -> desc */
 writel(0x1, link_base + 0x08);                     /* LINK_MODE = 1            */
 writel(0x1, link_base + 0x18);                     /* LINK_EN   = 1            */
-dsb(st); dmb(oshst);
+wmb();                                              /* commit cfg before kick   */
 writel(0x1, link_base + 0x0c);                      /* CFG_DONE -> HW commits   */
-/* poll link_base+0x4c for status (~21 ms budget), then clear + tear down:    */
+/* poll link_base+0x4c for status (~20 ms budget), then clear + tear down:    */
 writel(0xffff0000, link_base + 0x48);
 writel(0xffff0000, link_base + 0x4c);
 writel(0, link_base + 0x00); writel(0, link_base + 0x08);
-writel(0, link_base + 0x18); dmb(oshst); writel(0, link_base + 0x58);
+writel(0, link_base + 0x18); wmb(); writel(0, link_base + 0x58);
 ```
 
 The priming task's register/data layout (offsets, the 32-byte RLC + SPS/PPS, the
 descriptor) is taken verbatim from `mpp_hack_rk3576.c::rk3576_workaround_init`.
+
+## Apply & test
+
+```sh
+# from your kernel tree (mainline 7.0 or 7.1 — rkvdec is identical in both):
+git apply fix/0001-media-rkvdec-prime-VDPU383-deblock-warmup-rk3576.patch
+# build + install the rkvdec module (or the kernel) as usual, then reboot.
+```
+
+**Confirm it is actually active — check this first:**
+```sh
+dmesg | grep -i "deblock-priming"
+#   expect: "RK3576 H.264 deblock-priming workaround enabled"
+```
+If that line is absent, the workaround isn't compiled in or didn't run, and you're testing
+the *unpatched* behaviour. (The usual cause is porting only the decode code without this
+patch's probe hook — then the priming buffer is never allocated and the warmup silently
+no-ops. The fix is **not** self-contained in `rkvdec-vdpu383-h264.c`; it needs this patch's
+probe + resume wiring.)
+
+**What to expect:** the rows-4/12/13 corruption gone. On our R76S this was 64/64 bit-exact
+vs `avdec_h264` (baseline race ~17–40%). The race rate is **board-dependent**, so
+confirmation across more RK3576 boards is welcome.
+
+**What you do *not* need:** a devicetree change (mainline already maps `"link"`), or the
+sibling VP9/AV1 out-of-tree module. This patch alone is the whole H.264 correctness fix.
+
+**What it does *not* fix:** throughput (see the caveat below) — H.264, HEVC and VP9 on
+mainline RK3576 are single-shot and slower than the BSP regardless of this patch.
+
+> Status: **apply-verified** against v7.0 / v7.1-rc7. The underlying fix is validated 64/64
+> in our development tree; build + on-hardware validation of *this extracted/cleaned patch*
+> is in progress (independent confirmation welcome).
 
 ## Validation
 
@@ -88,5 +123,8 @@ needs the link-mode/throughput work.
 ## TL;DR for the maintainer
 
 The VDPU383 needs the BSP's `rk3576_workaround_run` priming decode at `pm_runtime_resume`;
-mainline omits it; adding it eliminates the deblock race (64/64 bit-exact). Reference port
-in the sibling VP9/AV1 repos (`rkvdec-link.c` warmup + `rkvdec.c` resume hook).
+mainline omits it; adding it eliminates the deblock race (64/64 bit-exact). A clean,
+DT-free, mainline-applicable patch is in this repo:
+[`fix/0001-media-rkvdec-prime-VDPU383-deblock-warmup-rk3576.patch`](fix/0001-media-rkvdec-prime-VDPU383-deblock-warmup-rk3576.patch)
+— a new `rkvdec-rk3576-workaround.c` + a `pm_runtime_resume` hook, `git apply`-clean on
+v7.0 / v7.1-rc7.
