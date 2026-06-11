@@ -23,6 +23,20 @@ is a small, self-contained, devicetree-free patch in [`fix/`](fix/).
 - **Not fixed by this:** throughput — mainline single-shot decode on RK3576 is slower than the
   BSP for *all* codecs (a separate limitation; see [FIX.md](FIX.md) § caveat).
 
+## What it looks like
+
+Mainline `rkvdec` H.264 decode on RK3576 vs correct output — the same frame (Big Buck Bunny):
+
+| Mainline HW decode (no warmup) | Correct output (with the warmup) |
+|---|---|
+| ![mainline HW decode, corrupt](images/h264-deblock-bug.png) | ![correct output](images/h264-correct.png) |
+
+The deblock-edge errors on luma rows `{4, 12, 13} mod 16` accumulate through the GOP into the
+heavy horizontal striping on the left. **Reproduced on hardware on two boards — ArmSoM Sige5
+(100% of decodes) and NanoPi R76S (~18% on this clip, non-deterministic) — and eliminated by the
+warmup (0/40 with it on the R76S).** (The corrupt frame is from the Sige5; the clean frame is the
+software reference, which the HW output matches once the warmup primes it.)
+
 ## The fix
 
 ```sh

@@ -112,6 +112,23 @@ Armbian 7.0.1):
 **Aggregate: 64/64 warmup decodes bit-exact; baseline race reproduced on both streams.**
 The warmup runs once per power-up, so it does **not** regress throughput.
 
+### Re-validated 2026-06-11 — two boards, A/B on demand
+
+Note: the warmup's priming **persists** across runtime-suspend *and* module reload, so a clean
+A/B can't be done mid-session — a true cold IP must be forced. Method: gate the warmup with a
+`warmup_off` module param and power-cycle the IP via driver **unbind/rebind** before each arm.
+HW decode vs a software reference (openh264dec / known-correct), per clip:
+
+| board | clip | WITHOUT warmup | WITH warmup |
+|---|---|---|---|
+| NanoPi R76S (7.0.1) | bbb1080 (real-world) | 11/60 (18%) corrupt | **0/40 clean** |
+| NanoPi R76S | long.h264 (SMPTE) | erratic, 0–75% across cold cycles | 0/40 clean |
+| ArmSoM Sige5 (7.0.6) | bbb1080 / long.h264 | **20/20 (100%) corrupt** | — (no build tree to load the warmup) |
+
+The rate is **board-dependent** (R76S ~18%, Sige5 100%) — consistent with the original
+non-determinism — and the warmup **eliminates it (0/80 across both clips on the R76S)**. The
+before/after frames in the README are the Sige5 (100%) HW decode vs the correct output.
+
 ## Caveat — this fixes correctness, not throughput
 
 Mainline single-shot decode on RK3576 is throughput-limited independently of this bug:
